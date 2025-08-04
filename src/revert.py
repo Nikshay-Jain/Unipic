@@ -29,4 +29,4 @@ def revert(parent_dir):
             pass
 
 if __name__ == "__main__":
-    revert(os.cwd())
+    revert(r"C:\Users\niksh\Desktop\pics")
