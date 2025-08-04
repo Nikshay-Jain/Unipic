@@ -1,26 +1,32 @@
-import os, shutil
+import os
 
 def revert(parent_dir):
-    # Iterate over all subdirectories
-    for entry in os.scandir(parent_dir):
-        if entry.is_dir():
-            subdir = entry.path
-            for file in os.listdir(subdir):
-                full_path = os.path.join(subdir, file)
-                dest_path = os.path.join(parent_dir, file)
+    for root, dirs, files in os.walk(parent_dir, topdown=False):
+        if root == parent_dir:
+            continue
 
-                # If filename already exists, rename to avoid overwrite
-                if os.path.exists(dest_path):
-                    base, ext = os.path.splitext(file)
-                    i = 1
-                    while os.path.exists(os.path.join(parent_dir, f"{base}_{i}{ext}")):
-                        i += 1
-                    dest_path = os.path.join(parent_dir, f"{base}_{i}{ext}")
+        for file in files:
+            src_path = os.path.join(root, file)
+            dest_path = os.path.join(parent_dir, file)
 
-                shutil.move(full_path, dest_path)
+            # Handle filename conflict
+            if os.path.exists(dest_path):
+                base, ext = os.path.splitext(file)
+                i = 1
+                while True:
+                    new_name = f"{base}_{i}{ext}"
+                    new_dest = os.path.join(parent_dir, new_name)
+                    if not os.path.exists(new_dest):
+                        dest_path = new_dest
+                        break
+                    i += 1
+            os.rename(src_path, dest_path)
 
-            # Delete subdirectory if empty
-            if not os.listdir(subdir):
-                os.rmdir(subdir)
-                
-revert(dir)
+        # Remove the empty subdirectories
+        try:
+            os.rmdir(root)
+        except OSError:
+            pass
+
+if __name__ == "__main__":
+    revert(os.cwd())
