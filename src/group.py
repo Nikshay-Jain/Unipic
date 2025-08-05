@@ -1,10 +1,10 @@
 import os, shutil, torch
+import itertools
+from os.path import basename
+
 import numpy as np
 from PIL import Image
 from torch.utils.data import Dataset, DataLoader
-from torchvision import transforms
-from sklearn.cluster import DBSCAN
-from sklearn.metrics.pairwise import cosine_similarity
 
 class ImageDataset(Dataset):
     def __init__(self, image_paths, transform):
@@ -19,19 +19,11 @@ class ImageDataset(Dataset):
         image = Image.open(path).convert("RGB")
         return self.transform(image), path
 
-def group_similar_images(input_dir, model_path="models/mobilenet_v3_feat.pt", eps=0.13, min_samples=2, batch_size=32, use_gpu=True):
+def group_similar_images(input_dir, eps=0.1, batch_size=32, model=None, transform=None, use_gpu=True):
+    if model is None or transform is None:
+        raise ValueError("Model and transform must be provided for optimized usage.")
+
     device = torch.device('cuda' if torch.cuda.is_available() and use_gpu else 'cpu')
-    print(f"Device set to: {device}")
-    if not os.path.exists(model_path):
-        raise FileNotFoundError(f"Model file not found: {model_path}")
-    
-    model = torch.jit.load(model_path).to(device).eval()
-    transform = transforms.Compose([
-        transforms.Resize((224, 224)),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                             std=[0.229, 0.224, 0.225])
-    ])
 
     valid_exts = ('.jpg', '.jpeg', '.png')
     image_paths = [os.path.join(input_dir, f)
@@ -46,6 +38,7 @@ def group_similar_images(input_dir, model_path="models/mobilenet_v3_feat.pt", ep
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=2)
 
     embeddings, final_paths = [], []
+
     for batch_imgs, batch_paths in loader:
         batch_imgs = batch_imgs.to(device)
         with torch.no_grad():
@@ -55,22 +48,40 @@ def group_similar_images(input_dir, model_path="models/mobilenet_v3_feat.pt", ep
         final_paths.extend(batch_paths)
 
     embeddings = np.vstack(embeddings).astype(np.float32)
-    sim_matrix = cosine_similarity(embeddings)
-    dist_matrix = np.clip(1.0 - sim_matrix, 0.0, None)
 
-    db = DBSCAN(eps=eps, min_samples=min_samples, metric='precomputed')
-    labels = db.fit_predict(dist_matrix)
-
-    label_counts = {label: list(labels).count(label) for label in set(labels)}
+    used = set()
     cluster_id = 1
-    for label in set(labels):
-        if label == -1 or label_counts[label] < 2:
-            continue
-        group_dir = os.path.join(input_dir, f"group_{cluster_id}")
-        os.makedirs(group_dir, exist_ok=True)
-        for i, img_path in enumerate(final_paths):
-            if labels[i] == label:
-                shutil.move(img_path, os.path.join(group_dir, os.path.basename(img_path)))
-        cluster_id += 1
+    n = len(final_paths)
 
-    print(f"[✓] Grouped {len(final_paths)} images into {cluster_id - 1} clusters (no singleton folders).")
+    for i in range(n):
+        if i in used:
+            continue
+
+        cluster_indices = [i]
+        used.add(i)
+
+        for j in range(i + 1, n):
+            if j in used:
+                continue
+            sim = np.dot(embeddings[i], embeddings[j])
+            if 1 - sim <= eps:
+                cluster_indices.append(j)
+                used.add(j)
+
+        if len(cluster_indices) > 1:
+            group_dir = os.path.join(input_dir, f"group_{cluster_id}")
+            os.makedirs(group_dir, exist_ok=True)
+            print(f"\n📂 Cluster {cluster_id}: {len(cluster_indices)} images")
+
+            # Print similarities within the group
+            for a, b in itertools.combinations(cluster_indices, 2):
+                sim = np.dot(embeddings[a], embeddings[b])
+                print(f"  {basename(final_paths[a])} ↔ {basename(final_paths[b])} → sim: {sim:.4f}, dist: {1 - sim:.4f}")
+
+            # Move files
+            for idx in cluster_indices:
+                shutil.move(final_paths[idx], os.path.join(group_dir, os.path.basename(final_paths[idx])))
+
+            cluster_id += 1
+
+    print(f"\n[✓] Grouped {len(used)} images into {cluster_id - 1} strict clusters.")
