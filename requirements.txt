@@ -3,3 +3,6 @@ pillow
 scikit-learn
 torch
 torchvision
+transformers
+opencv-python
+tqdm
