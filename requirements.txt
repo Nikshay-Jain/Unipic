@@ -5,4 +5,5 @@ torch
 torchvision
 transformers
 opencv-python
+pytesseract
 tqdm
