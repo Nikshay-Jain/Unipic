@@ -26,7 +26,7 @@ _transform = transforms.Compose([
                          std=[0.229, 0.224, 0.225])
 ])
 
-def move_text_heavy_images(parent_dir, text_ratio_thresh=0.00005):
+def move_text_heavy_images(parent_dir, text_ratio_thresh=0.000035):
     text_heavy_dir = os.path.join(parent_dir, "text_heavy")
     os.makedirs(text_heavy_dir, exist_ok=True)
 
