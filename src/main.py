@@ -1,26 +1,29 @@
-from utils import move_text_heavy_images, group_similar_images, pick_best_image_per_folder, move_best_and_clean
+from utils import *
 import time
 
 if __name__ == '__main__':
-    input_dir = r"C:\Users\niksh\Desktop\Photos_PJ"
+    input_dir = r"C:\Users\niksh\Downloads\Photos_PJ"
 
     t1 = time.time()
     print(f"Processing images in: {input_dir}")
 
+    remove_lower_res_duplicates(input_dir)
+
     print("Filtering text-heavy images...")
     move_text_heavy_images(input_dir)
     t2 = time.time()
-    print("Text-heavy images moving took: {t2 - t1:.2f} seconds\n")
+    print(f"Text-heavy images moving took: {t2 - t1:.2f} seconds\n")
 
     print("Grouping similar images...")
     group_similar_images(input_dir)
     t3 = time.time()
-    print("Grouping similar images took: {t3 - t2:.2f} seconds\n")
+    print(f"Grouping similar images took: {t3 - t1:.2f} seconds\n")
 
     print("Picking best images from similar ones...")
     pick_best_image_per_folder(input_dir)
     t4 = time.time()
-    print("Picking best images took: {t4 - t3:.2f} seconds\n")
+    print(f"Picking best images took: {t4 - t3:.2f} seconds\n")
+    print(f"Total time taken: {(t4-t1)/60:.2f} mins")
 
     print("Cleaning up and moving best images...")
     move_best_and_clean(input_dir)
