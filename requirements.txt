@@ -1,9 +1,12 @@
 numpy
+tqdm
 pillow
+pillow-heif
 scikit-learn
 torch
 torchvision
 transformers
-opencv-python
+opencv-python-headless
 pytesseract
-tqdm
+huggingface_hub[hf_xet]
+streamlit
