@@ -1,5 +1,5 @@
-import os, time, itertools, shutil, cv2, pytesseract
 import numpy as np
+import os, itertools, shutil, cv2, pytesseract
 
 from os.path import basename
 from PIL import Image, UnidentifiedImageError
@@ -8,14 +8,14 @@ from sklearn.metrics.pairwise import cosine_similarity
 import torch
 from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms
-from torchvision.models import mobilenet_v3_small
-from tqdm import tqdm
+from torchvision.models import mobilenet_v3_small, MobileNet_V3_Small_Weights
 from transformers import CLIPModel, CLIPProcessor
+from tqdm import tqdm
 
 # Define model and transform only once
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-_model = mobilenet_v3_small(pretrained=True)
+_model = mobilenet_v3_small(weights=MobileNet_V3_Small_Weights.DEFAULT)
 _model = torch.nn.Sequential(*list(_model.children())[:-1])
 _model.to(device).eval()
 
@@ -26,12 +26,23 @@ _transform = transforms.Compose([
                          std=[0.229, 0.224, 0.225])
 ])
 
+# add a single canonical set of extensions (lowercase)
+VALID_EXTS = ('.jpg', '.jpeg', '.png', '.webp', '.bmp', '.tiff', '.heic')
+
+# optional: register HEIF/HEIC opener if pillow-heif is installed
+try:
+    import pillow_heif
+    pillow_heif.register_heif_opener()
+except Exception:
+    # pillow-heif not installed — HEIC will be skipped or fail to open
+    pass
+
 def remove_lower_res_duplicates(folder_path):
     """
     Removes duplicate images that have the same name but different extensions.
     Keeps the one with higher image dimensions (width*height).
     """
-    valid_exts = {'.jpg', '.jpeg', '.png', '.webp', '.bmp', '.tiff'}
+    valid_exts = set(VALID_EXTS)
     files_by_name = {}
 
     # Group files by basename (without extension)
@@ -75,9 +86,8 @@ def remove_lower_res_duplicates(folder_path):
 def move_text_heavy_images(parent_dir, text_ratio_thresh=0.000035):
     text_heavy_dir = os.path.join(parent_dir, "text_heavy")
     os.makedirs(text_heavy_dir, exist_ok=True)
-
-    valid_exts = ('.jpg', '.jpeg', '.png')
-    image_files = [f for f in os.listdir(parent_dir) if f.lower().endswith(valid_exts)]
+ 
+    image_files = [f for f in os.listdir(parent_dir) if f.lower().endswith(VALID_EXTS)]
 
     for img_file in tqdm(image_files, desc="Scanning images", unit="img"):
         img_path = os.path.join(parent_dir, img_file)
@@ -126,17 +136,15 @@ class ImageDataset(Dataset):
             return None
         return self.transform(image), path
 
-
-def group_similar_images(input_dir, eps=0.13, batch_size=32, model=_model, transform=_transform, use_gpu=True):
+def group_similar_images(input_dir, sim_thresh=0.9, batch_size=32, model=_model, transform=_transform, use_gpu=True):
     if model is None or transform is None:
         raise ValueError("Model and transform must be provided for optimized usage.")
 
     device = torch.device('cuda' if torch.cuda.is_available() and use_gpu else 'cpu')
 
-    valid_exts = ('.jpg', '.jpeg', '.png')
     image_paths = [os.path.join(input_dir, f)
                    for f in os.listdir(input_dir)
-                   if f.lower().endswith(valid_exts)]
+                   if f.lower().endswith(VALID_EXTS)]
 
     if not image_paths:
         print("No valid images found.")
@@ -183,7 +191,7 @@ def group_similar_images(input_dir, eps=0.13, batch_size=32, model=_model, trans
             if j in used:
                 continue
             sim = np.dot(embeddings[i], embeddings[j])
-            if 1 - sim <= eps:
+            if sim >= sim_thresh:
                 cluster_indices.append(j)
                 used.add(j)
 
@@ -208,7 +216,13 @@ def pick_best_image_per_folder(parent_dir):
 
     # Load CLIP model and processor
     _clip_model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32").to(device).eval()
-    _clip_proc = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
+    
+    # Try fast processor first, fallback to slow if incompatible
+    try:
+        _clip_proc = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32", use_fast=True)
+    except Exception:
+        print("[!] Fast processor unavailable, falling back to slow processor.")
+        _clip_proc = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32", use_fast=False)
 
     # Prompt can be tuned here
     text_prompt = "a beautiful, sharp, well-composed photo with attractive facial expressions, tall & slim body, aesthetic eyes, flawless skin & background."
@@ -232,7 +246,7 @@ def pick_best_image_per_folder(parent_dir):
 
         # Collect all images in this subfolder
         for filename in sorted(os.listdir(subfolder_path)):
-            if filename.lower().endswith(('.jpg', '.jpeg', '.png')):
+            if filename.lower().endswith(VALID_EXTS):
                 path = os.path.join(subfolder_path, filename)
                 try:
                     img = Image.open(path).convert("RGB")
