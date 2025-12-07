@@ -1,4 +1,5 @@
 import numpy as np
+from pathlib import Path
 import os, itertools, shutil, cv2, pytesseract
 
 from os.path import basename
@@ -337,3 +338,73 @@ def revert(parent_dir):
             os.rmdir(root)
         except OSError:
             pass
+
+def log_metrics(init_count, final_count, storage_saved_mb, ai_success_percent, metrics_file="metrics.csv"):
+    """
+    Logs processing metrics to a CSV file with atomic write (safe for concurrent access).
+    
+    Args:
+        init_count: Initial number of photos uploaded
+        final_count: Final number of photos kept
+        storage_saved_mb: Storage space saved in MB
+        ai_success_percent: Percentage of times user kept AI's best choice
+        metrics_file: Path to metrics CSV file (defaults to project root)
+    
+    Returns:
+        bool: True if logged successfully, False otherwise
+    """
+    try:
+        # Determine metrics file path
+        # If metrics_file is absolute, use it; else look in project root
+        if not os.path.isabs(metrics_file):
+            # Try to find project root (parent of src/)
+            project_root = Path(__file__).parent.parent
+            metrics_file = os.path.join(project_root, metrics_file)
+        
+        # Ensure directory exists
+        os.makedirs(os.path.dirname(metrics_file), exist_ok=True)
+        
+        # Calculate pics deleted
+        pics_deleted = init_count - final_count
+        
+        # Check if file exists and has header
+        file_exists = os.path.exists(metrics_file) and os.path.getsize(metrics_file) > 0
+        
+        # Write atomically: write to temp file, then rename
+        import tempfile
+        temp_fd, temp_path = tempfile.mkstemp(dir=os.path.dirname(metrics_file) or ".")
+        
+        try:
+            with open(temp_path, 'w', newline='', encoding='utf-8') as tmp_file:
+                # If file doesn't exist, write header first
+                if not file_exists:
+                    tmp_file.write("init_no,final_no,pics_deleted,storage_saved_mb,ai_success_%\n")
+                
+                # Read existing rows if file exists
+                if file_exists:
+                    with open(metrics_file, 'r', encoding='utf-8') as orig:
+                        existing_content = orig.read()
+                    tmp_file.write(existing_content)
+                
+                # Append new row
+                tmp_file.write(f"{init_count},{final_count},{pics_deleted},{storage_saved_mb:.2f},{ai_success_percent:.0f}\n")
+            
+            # Atomic rename
+            if os.path.exists(metrics_file):
+                os.remove(metrics_file)
+            os.rename(temp_path, metrics_file)
+            
+            return True
+        except Exception as e:
+            # Clean up temp file if something goes wrong
+            try:
+                os.close(temp_fd)
+                os.remove(temp_path)
+            except:
+                pass
+            print(f"[Metrics] Error writing to temp file: {e}")
+            return False
+            
+    except Exception as e:
+        print(f"[Metrics] Failed to log metrics: {e}")
+        return False

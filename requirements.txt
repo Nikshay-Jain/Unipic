@@ -1,5 +1,6 @@
 numpy
 tqdm
+requests
 pillow
 pillow-heif
 scikit-learn

@@ -1,10 +1,13 @@
 import streamlit as st
 import streamlit.components.v1 as components
 import os, shutil, zipfile, tempfile
+import requests
+import json
 from utils import (
     remove_lower_res_duplicates,
     group_similar_images,
-    pick_best_image_per_folder
+    pick_best_image_per_folder,
+    log_metrics
 )
 
 # --- CONFIGURATION & CUSTOM CSS ---
@@ -232,6 +235,50 @@ def calculate_compliance(groups, selections):
                 
     return agreements, total_decisions
 
+def push_metrics_to_github(init_count, final_count, storage_saved_mb, ai_success_percent):
+    """
+    Push metrics to GitHub via Actions repository_dispatch webhook.
+    Requires GITHUB_TOKEN in Streamlit secrets.
+    """
+    try:
+        # Read GitHub token from Streamlit secrets
+        github_token = st.secrets.get("GITHUB_TOKEN", None)
+        if not github_token:
+            st.warning("⚠️ GITHUB_TOKEN not configured in Streamlit secrets. Metrics will only be saved locally.")
+            return False
+        
+        # Prepare CSV row
+        pics_deleted = init_count - final_count
+        csv_row = f"{init_count},{final_count},{pics_deleted},{storage_saved_mb:.2f},{ai_success_percent:.0f}"
+        
+        # Trigger GitHub Actions workflow
+        headers = {
+            "Authorization": f"token {github_token}",
+            "Accept": "application/vnd.github.v3+json"
+        }
+        
+        payload = {
+            "event_type": "metrics-update",
+            "client_payload": {
+                "metrics": csv_row
+            }
+        }
+        
+        response = requests.post(
+            "https://api.github.com/repos/Nikshay-Jain/Unipic/dispatches",
+            headers=headers,
+            json=payload
+        )
+        
+        if response.status_code == 204:
+            return True
+        else:
+            st.error(f"Failed to push metrics: {response.status_code}")
+            return False
+    except Exception as e:
+        st.warning(f"Could not push to GitHub: {e}")
+        return False
+
 # --- MAIN UI FLOW ---
 
 # 1. INPUT PHASE
@@ -457,6 +504,22 @@ if st.session_state.get('finished'):
         col2.metric("Space Saved", f"{mb_saved:.2f} MB")
         col3.metric("Photos", f"{kept_count}", delta=f"{kept_count - initial}")
 
+        # Log metrics to CSV (automatically)
+        metrics_logged = log_metrics(
+            init_count=initial,
+            final_count=kept_count,
+            storage_saved_mb=mb_saved,
+            ai_success_percent=compliance_rate,
+            metrics_file="../metrics.csv"
+        )
+        if metrics_logged:
+            st.caption("✓ Metrics logged automatically")
+            
+            # Push to GitHub for cloud persistence
+            github_pushed = push_metrics_to_github(initial, kept_count, mb_saved, compliance_rate)
+            if github_pushed:
+                st.caption("✓ Synced to GitHub repository")
+
         with open(zip_path, "rb") as fp:
             st.download_button(
                 label=f"Download .zip",
@@ -465,7 +528,7 @@ if st.session_state.get('finished'):
                 mime="application/zip",
                 type="primary"
             )
-    
+
     st.markdown("<br>", unsafe_allow_html=True)
     # Scroll logic using anchor
     if st.session_state.get('scroll_after_done', False):
