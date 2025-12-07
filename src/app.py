@@ -2,13 +2,14 @@ import streamlit as st
 import streamlit.components.v1 as components
 import os, shutil, zipfile, tempfile
 import requests
-import json
 from utils import (
     remove_lower_res_duplicates,
     group_similar_images,
     pick_best_image_per_folder,
-    log_metrics
+    log_metrics,
+    fix_image_orientation
 )
+from PIL import Image
 
 # --- CONFIGURATION & CUSTOM CSS ---
 st.set_page_config(
@@ -77,7 +78,7 @@ st.markdown("""
         top: -12px;
         left: 50%;
         transform: translateX(-50%);
-        background-color: #111827;
+        background-color: #10b981;
         color: white;
         padding: 6px 14px;
         border-radius: 20px;
@@ -414,8 +415,15 @@ else:
         if best_pic:
             st.markdown('<div class="best-image-container"><div class="best-badge">AI RECOMMENDATION</div>', unsafe_allow_html=True)
             
-            # Display Image
-            st.image(best_pic, width='stretch')
+            # Display Image (open via PIL and fix orientation)
+            try:
+                with Image.open(best_pic) as im:
+                    im = fix_image_orientation(im)
+                    im = im.convert("RGB")
+                    st.image(im, width="content")
+            except Exception:
+                # Fallback: let Streamlit handle path if PIL fails
+                st.image(best_pic, width="content")
             
             # Checkbox logic
             is_selected = st.session_state.selections.get(best_pic, True)
@@ -436,7 +444,14 @@ else:
             for i, img_path in enumerate(others):
                 col = cols[i % 2]
                 with col:
-                    st.image(img_path, width='stretch')
+                    try:
+                        with Image.open(img_path) as im:
+                            im = fix_image_orientation(im)
+                            im = im.convert("RGB")
+                            st.image(im, width="content")
+                    except Exception:
+                        st.image(img_path, width="content")
+                        
                     # Checkbox
                     is_selected = st.session_state.selections.get(img_path, False)
                     new_val = st.checkbox(f"Keep", value=is_selected, key=img_path, label_visibility="visible")
@@ -510,7 +525,7 @@ if st.session_state.get('finished'):
             final_count=kept_count,
             storage_saved_mb=mb_saved,
             ai_success_percent=compliance_rate,
-            metrics_file="../metrics.csv"
+            metrics_file="metrics.csv"
         )
         if metrics_logged:
             st.caption("✓ Metrics logged automatically")

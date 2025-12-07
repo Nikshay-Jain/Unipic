@@ -3,7 +3,7 @@ from pathlib import Path
 import os, itertools, shutil, cv2, pytesseract
 
 from os.path import basename
-from PIL import Image, UnidentifiedImageError
+from PIL import Image, UnidentifiedImageError, ImageOps
 from sklearn.metrics.pairwise import cosine_similarity
 
 import torch
@@ -38,6 +38,18 @@ except Exception:
     # pillow-heif not installed — HEIC will be skipped or fail to open
     pass
 
+def fix_image_orientation(image):
+    """
+    Fixes image orientation based on EXIF data.
+    Handles rotations (90°, 180°, 270°) and flips.
+    Returns image in correct orientation.
+    """
+    try:
+        # Use Pillow's built-in helper to apply EXIF orientation
+        return ImageOps.exif_transpose(image)
+    except Exception:
+        return image
+    
 def remove_lower_res_duplicates(folder_path):
     """
     Removes duplicate images that have the same name but different extensions.
@@ -131,6 +143,7 @@ class ImageDataset(Dataset):
         path = self.image_paths[idx]
         try:
             image = Image.open(path).convert("RGB")
+            image = fix_image_orientation(image)    # Fix EXIF orientation before returning
         except (UnidentifiedImageError, OSError):
             print(f"[✗] Skipping broken image during load: {path}")
             os.remove(path)
@@ -354,57 +367,27 @@ def log_metrics(init_count, final_count, storage_saved_mb, ai_success_percent, m
         bool: True if logged successfully, False otherwise
     """
     try:
-        # Determine metrics file path
-        # If metrics_file is absolute, use it; else look in project root
+        # Resolve path: if relative, place in project root
         if not os.path.isabs(metrics_file):
-            # Try to find project root (parent of src/)
             project_root = Path(__file__).parent.parent
             metrics_file = os.path.join(project_root, metrics_file)
-        
+
         # Ensure directory exists
         os.makedirs(os.path.dirname(metrics_file), exist_ok=True)
-        
-        # Calculate pics deleted
+
         pics_deleted = init_count - final_count
-        
-        # Check if file exists and has header
-        file_exists = os.path.exists(metrics_file) and os.path.getsize(metrics_file) > 0
-        
-        # Write atomically: write to temp file, then rename
-        import tempfile
-        temp_fd, temp_path = tempfile.mkstemp(dir=os.path.dirname(metrics_file) or ".")
-        
-        try:
-            with open(temp_path, 'w', newline='', encoding='utf-8') as tmp_file:
-                # If file doesn't exist, write header first
-                if not file_exists:
-                    tmp_file.write("init_no,final_no,pics_deleted,storage_saved_mb,ai_success_%\n")
-                
-                # Read existing rows if file exists
-                if file_exists:
-                    with open(metrics_file, 'r', encoding='utf-8') as orig:
-                        existing_content = orig.read()
-                    tmp_file.write(existing_content)
-                
-                # Append new row
-                tmp_file.write(f"{init_count},{final_count},{pics_deleted},{storage_saved_mb:.2f},{ai_success_percent:.0f}\n")
-            
-            # Atomic rename
-            if os.path.exists(metrics_file):
-                os.remove(metrics_file)
-            os.rename(temp_path, metrics_file)
-            
-            return True
-        except Exception as e:
-            # Clean up temp file if something goes wrong
-            try:
-                os.close(temp_fd)
-                os.remove(temp_path)
-            except:
-                pass
-            print(f"[Metrics] Error writing to temp file: {e}")
-            return False
-            
+
+        # If file doesn't exist or is empty, we need to write header first
+        header_needed = not os.path.exists(metrics_file) or os.path.getsize(metrics_file) == 0
+
+        # Open in append mode (safer on Windows than atomic rename)
+        with open(metrics_file, 'a', encoding='utf-8', newline='') as f:
+            if header_needed:
+                f.write("init_no,final_no,pics_deleted,storage_saved_mb,ai_success_%\n")
+            f.write(f"{init_count},{final_count},{pics_deleted},{storage_saved_mb:.2f},{ai_success_percent:.0f}\n")
+
+        return True
+
     except Exception as e:
         print(f"[Metrics] Failed to log metrics: {e}")
         return False
