@@ -490,12 +490,16 @@ else:
 
 # 3. COMPLETION PHASE
 if st.session_state.get('finished'):
-    # Inject an anchor to scroll to
     st.markdown('<div id="completion-anchor"></div>', unsafe_allow_html=True)
     st.markdown("### 🎉 Cleanup Complete!")
     
-    # 1. Ask for directory name
     dir_name = st.text_input("Preferred Album Name for Download:", value="Unipic_cleaned")
+    
+    # Store generated ZIP in session state to persist across reruns
+    if 'zip_generated' not in st.session_state:
+        st.session_state.zip_generated = False
+        st.session_state.zip_data = None
+        st.session_state.zip_stats = None
     
     if st.button("Generate Report", type="primary"):
         with st.spinner("Compiling your clean gallery..."):
@@ -505,69 +509,56 @@ if st.session_state.get('finished'):
                 dir_name
             )
             
-            # Stats Calculations
             agreements, total_decisions = calculate_compliance(st.session_state.groups_data, st.session_state.selections)
             compliance_rate = (agreements / total_decisions * 100) if total_decisions > 0 else 100
             
             mb_saved = deleted_bytes / (1024 * 1024)
             initial = st.session_state.initial_count
             
-        # Display Stats
+            # Store ZIP data in session state (persists across reruns)
+            with open(zip_path, "rb") as fp:
+                st.session_state.zip_data = fp.read()
+            
+            st.session_state.zip_stats = {
+                "kept": kept_count,
+                "deleted": deleted_count,
+                "saved_mb": mb_saved,
+                "compliance": compliance_rate,
+                "initial": initial
+            }
+            st.session_state.zip_generated = True
+    
+    # Display stats and download button if ZIP was generated
+    if st.session_state.zip_generated and st.session_state.zip_stats:
+        stats = st.session_state.zip_stats
+        
         st.success("Analysis Report")
         col1, col2, col3 = st.columns(3)
-        col1.metric("AI Compliance", f"{compliance_rate:.0f}%", help="How often you kept the AI's best choice")
-        col2.metric("Space Saved", f"{mb_saved:.2f} MB")
-        col3.metric("Photos", f"{kept_count}", delta=f"{kept_count - initial}")
+        col1.metric("AI Compliance", f"{stats['compliance']:.0f}%", help="How often you kept the AI's best choice")
+        col2.metric("Space Saved", f"{stats['saved_mb']:.2f} MB")
+        col3.metric("Photos", f"{stats['kept']}", delta=f"{stats['kept'] - stats['initial']}")
 
-        # Log metrics to CSV (automatically)
+        # Log metrics
         metrics_logged = log_metrics(
-            init_count=initial,
-            final_count=kept_count,
-            storage_saved_mb=mb_saved,
-            ai_success_percent=compliance_rate,
+            init_count=stats['initial'],
+            final_count=stats['kept'],
+            storage_saved_mb=stats['saved_mb'],
+            ai_success_percent=stats['compliance'],
             metrics_file="metrics.csv"
         )
         if metrics_logged:
             st.caption("✓ Metrics logged automatically")
-            
-            # Push to GitHub for cloud persistence
-            github_pushed = push_metrics_to_github(initial, kept_count, mb_saved, compliance_rate)
-            if github_pushed:
-                st.caption("✓ Synced to GitHub repository")
-
-        with open(zip_path, "rb") as fp:
-            st.download_button(
-                label=f"Download .zip",
-                data=fp,
-                file_name=f"{dir_name}.zip",
-                mime="application/zip",
-                type="primary"
-            )
-
-    st.markdown("<br>", unsafe_allow_html=True)
-    # Scroll logic using anchor
-    if st.session_state.get('scroll_after_done', False):
-        components.html(
-            """
-            <script>
-                try {
-                    // Find the anchor element we injected
-                    var anchor = window.parent.document.getElementById("completion-anchor");
-                    if (anchor) {
-                        setTimeout(function() {
-                            anchor.scrollIntoView({behavior: "smooth", block: "start"});
-                        }, 100);
-                    }
-                } catch(e) {
-                    console.log("Scroll error:", e);
-                }
-            </script>
-            """,
-            height=0,
-            width=0
+        
+        # Download button (now stable across reruns)
+        st.download_button(
+            label="📥 Download .zip",
+            data=st.session_state.zip_data,
+            file_name=f"{dir_name}.zip",
+            mime="application/zip",
+            type="primary"
         )
-        # reset the flag so we don't auto-scroll again on further reruns
-        st.session_state.scroll_after_done = False
+    
+    st.markdown("<br>", unsafe_allow_html=True)
     if st.button("Start Over (Clear Cache)"):
         try:
             shutil.rmtree(st.session_state.temp_dir)

@@ -116,7 +116,7 @@ def move_text_heavy_images(parent_dir, text_ratio_thresh=0.000035):
             tqdm.write(f"{img_file} --> Text Ratio: {ratio:.5f}")
 
             if ratio > text_ratio_thresh:
-                shutil.move(img_path, os.path.join(text_heavy_dir, img_file))
+                os.remove(img_path)
         except Exception as e:
             tqdm.write(f"Skipping {img_file}: {e}")
 
@@ -288,35 +288,6 @@ def pick_best_image_per_folder(parent_dir):
             best_name = os.path.join(os.path.dirname(best_path), f"best_{base}{ext}")
             os.rename(best_path, best_name)
             print(f"\n✅ Best image in '{subfolder}': {os.path.basename(best_name)} (Score: {image_scores[best_idx]:.4f})")
-
-def move_best_and_clean(parent_dir):
-    # Walk through all subdirectories
-    for root, dirs, files in os.walk(parent_dir, topdown=False):
-        # Skip parent directory
-        if root == parent_dir:
-            continue
-
-        # Check if this is a last-level subdirectory (has no further subdirs)
-        if not dirs:
-            for file in files:
-                if file.lower().startswith("best_"):
-                    src_path = os.path.join(root, file)
-                    dest_filename = file[len("best_"):]
-                    dest_path = os.path.join(parent_dir, dest_filename)
-
-                    # Avoid overwriting in parent dir
-                    counter = 1
-                    while os.path.exists(dest_path):
-                        name, ext = os.path.splitext(dest_filename)
-                        dest_path = os.path.join(parent_dir, f"{name}_{counter}{ext}")
-                        counter += 1
-
-                    shutil.move(src_path, dest_path)
-
-            # Delete the entire subdirectory and its contents
-            shutil.rmtree(root)
-
-    print("[✓] Done moving 'best_' files and cleaning subdirectories.")
 
 def revert(parent_dir):
     for root, dirs, files in os.walk(parent_dir, topdown=False):
