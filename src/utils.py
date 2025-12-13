@@ -50,10 +50,46 @@ def fix_image_orientation(image):
     except Exception:
         return image
     
-def remove_lower_res_duplicates(folder_path):
+def compute_embeddings(image_paths, batch_size=32, model=_model, transform=_transform, use_gpu=True):
+    """
+    Compute embeddings (L2-normalized) for a list of image paths using the provided model/transform.
+    Returns: embeddings (N x D numpy array), valid_paths (list)
+    """
+    device = torch.device('cuda' if torch.cuda.is_available() and use_gpu else 'cpu')
+
+    dataset = ImageDataset(image_paths, transform)
+    if not len(dataset):
+        return np.zeros((0, 0), dtype=np.float32), []
+
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=2)
+
+    embeddings = []
+    paths = []
+    for batch in tqdm(loader, total=len(loader), desc="Embedding (compute_once)"):
+        if batch is None:
+            continue
+        imgs, batch_paths = batch
+        imgs = imgs.to(device)
+        with torch.no_grad():
+            emb = model(imgs).squeeze(-1).squeeze(-1).cpu().numpy()
+            emb = emb / np.linalg.norm(emb, axis=1, keepdims=True)
+        embeddings.append(emb)
+        paths.extend(batch_paths)
+
+    if not embeddings:
+        return np.zeros((0, 0), dtype=np.float32), []
+
+    embeddings = np.vstack(embeddings).astype(np.float32)
+    return embeddings, paths
+
+# ...existing code...
+
+def remove_lower_res_duplicates(folder_path, run_near_dup=True, embeddings=None, paths=None):
     """
     Removes duplicate images that have the same name but different extensions.
     Keeps the one with higher image dimensions (width*height).
+    Optionally runs a subsequent near-duplicate removal (now controlled by run_near_dup).
+    Returns: set of file paths removed (if any).
     """
     valid_exts = set(VALID_EXTS)
     files_by_name = {}
@@ -68,34 +104,46 @@ def remove_lower_res_duplicates(folder_path):
         if ext in valid_exts:
             files_by_name.setdefault(name.lower(), []).append(file_path)
 
+    removed_files = set()
     # Process groups
-    for name, paths in files_by_name.items():
-        if len(paths) > 1:  # Multiple extensions for same name
+    for name, paths_list in files_by_name.items():
+        if len(paths_list) > 1:  # Multiple extensions for same name
             best_file = None
             best_size = -1
 
-            for path in paths:
+            for px in paths_list:
                 try:
-                    with Image.open(path) as img:
+                    with Image.open(px) as img:
                         width, height = img.size
                         size = width * height
                         if size > best_size:
                             best_size = size
-                            best_file = path
+                            best_file = px
                 except Exception as e:
-                    print(f"Error reading {path}: {e}")
+                    print(f"Error reading {px}: {e}")
 
             # Delete the rest
-            for path in paths:
-                if path != best_file:
+            for px in paths_list:
+                if px != best_file:
                     try:
-                        os.remove(path)
-                        print(f"Deleted lower-res: {path}")
+                        os.remove(px)
+                        removed_files.add(px)
+                        print(f"Deleted lower-res: {px}")
                     except Exception as e:
-                        print(f"Error deleting {path}: {e}")
+                        print(f"Error deleting {px}: {e}")
 
     print("Cleanup complete.")
-    
+    # Optionally: after exact-name duplicates removal, also remove near-duplicates
+    if run_near_dup:
+        try:
+            removed_set = remove_near_duplicates(folder_path, sim_thresh=0.99, embeddings=embeddings, paths=paths)
+            if removed_set:
+                removed_files.update(removed_set)
+        except Exception:
+            pass
+
+    return removed_files
+
 def move_text_heavy_images(parent_dir, text_ratio_thresh=0.000035):
     text_heavy_dir = os.path.join(parent_dir, "text_heavy")
     os.makedirs(text_heavy_dir, exist_ok=True)
@@ -116,9 +164,91 @@ def move_text_heavy_images(parent_dir, text_ratio_thresh=0.000035):
             tqdm.write(f"{img_file} --> Text Ratio: {ratio:.5f}")
 
             if ratio > text_ratio_thresh:
-                os.remove(img_path)
+                shutil.move(img_path, os.path.join(text_heavy_dir, img_file))
         except Exception as e:
             tqdm.write(f"Skipping {img_file}: {e}")
+
+
+def remove_near_duplicates(folder_path, sim_thresh=0.99, batch_size=32, model=_model, transform=_transform, use_gpu=True, embeddings=None, paths=None):
+    """
+    Removes near-duplicate images (similarity >= sim_thresh) from folder_path.
+    If embeddings and paths are provided, they will be used directly to avoid recomputation.
+    Returns: a set of file paths that were deleted.
+    """
+    device = torch.device('cuda' if torch.cuda.is_available() and use_gpu else 'cpu')
+
+    # If no precomputed embeddings were supplied, compute them here
+    if embeddings is None or paths is None:
+        image_paths = [os.path.join(folder_path, f)
+                       for f in os.listdir(folder_path)
+                       if f.lower().endswith(VALID_EXTS) and os.path.isfile(os.path.join(folder_path, f))]
+        if len(image_paths) < 2:
+            return set()
+        embeddings, paths = compute_embeddings(image_paths, batch_size=batch_size, model=model, transform=transform, use_gpu=use_gpu)
+
+    if len(paths) < 2 or embeddings.size == 0:
+        return set()
+
+    removed = set()
+    print("\n🔎 Scanning for near-duplicates (>={:.3f})...".format(sim_thresh))
+    for i in range(len(paths)):
+        if paths[i] in removed:
+            continue
+        for j in range(i + 1, len(paths)):
+            if paths[j] in removed:
+                continue
+            sim = float(np.dot(embeddings[i], embeddings[j]))
+            if sim >= sim_thresh:
+                a = paths[i]
+                b = paths[j]
+                name_a = os.path.basename(a).lower()
+                name_b = os.path.basename(b).lower()
+                # preferentially delete ones with 'wa'
+                if 'wa' in name_a and 'wa' not in name_b:
+                    to_delete = a
+                    kept = b
+                elif 'wa' in name_b and 'wa' not in name_a:
+                    to_delete = b
+                    kept = a
+                else:
+                    try:
+                        with Image.open(a) as ia:
+                            sa = ia.size[0] * ia.size[1]
+                    except Exception:
+                        sa = 0
+                    try:
+                        with Image.open(b) as ib:
+                            sb = ib.size[0] * ib.size[1]
+                    except Exception:
+                        sb = 0
+                    if sa < sb:
+                        to_delete = a
+                        kept = b
+                    elif sb < sa:
+                        to_delete = b
+                        kept = a
+                    else:
+                        # tie-breaker: delete the one with smaller file size; keep other
+                        try:
+                            if os.path.getsize(a) <= os.path.getsize(b):
+                                to_delete = a
+                                kept = b
+                            else:
+                                to_delete = b
+                                kept = a
+                        except Exception:
+                            to_delete = b
+                            kept = a
+
+                try:
+                    os.remove(to_delete)
+                    removed.add(to_delete)
+                    print(f"Deleted near-duplicate: {to_delete} (kept: {kept}, sim={sim:.4f})")
+                except Exception as e:
+                    print(f"Failed to delete {to_delete}: {e}")
+
+    print("Near-duplicate cleanup complete.")
+    return removed
 
 class ImageDataset(Dataset):
     def __init__(self, image_paths, transform):
@@ -150,43 +280,28 @@ class ImageDataset(Dataset):
             return None
         return self.transform(image), path
 
-def group_similar_images(input_dir, sim_thresh=0.9, batch_size=32, model=_model, transform=_transform, use_gpu=True):
+def group_similar_images(input_dir, sim_thresh=0.9, batch_size=32, model=_model, transform=_transform, use_gpu=True, embeddings=None, final_paths=None):
+    """
+    Groups images into clusters based on embeddings. Accepts optional precomputed embeddings/final_paths.
+    """
     if model is None or transform is None:
         raise ValueError("Model and transform must be provided for optimized usage.")
 
     device = torch.device('cuda' if torch.cuda.is_available() and use_gpu else 'cpu')
 
-    image_paths = [os.path.join(input_dir, f)
-                   for f in os.listdir(input_dir)
-                   if f.lower().endswith(VALID_EXTS)]
+    # If no provided final_paths/embeddings, compute them now
+    if final_paths is None or embeddings is None:
+        image_paths = [os.path.join(input_dir, f)
+                       for f in os.listdir(input_dir)
+                       if f.lower().endswith(VALID_EXTS)]
+        if not image_paths:
+            print("No valid images found.")
+            return
+        embeddings, final_paths = compute_embeddings(image_paths, batch_size=batch_size, model=model, transform=transform, use_gpu=use_gpu)
 
-    if not image_paths:
-        print("No valid images found.")
-        return
-
-    dataset = ImageDataset(image_paths, transform)
-    if not len(dataset):
+    if len(final_paths) == 0:
         print("[!] No valid images left after removing corrupted ones.")
         return
-
-    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=2)
-
-    embeddings, final_paths = [], []
-
-    # Progress bar for embedding extraction
-    print("\n🔍 Extracting embeddings...")
-    for batch in tqdm(loader, total=len(loader), desc="Embedding Progress"):
-        if batch is None:
-            continue
-        batch_imgs, batch_paths = batch
-        batch_imgs = batch_imgs.to(device)
-        with torch.no_grad():
-            batch_emb = model(batch_imgs).squeeze(-1).squeeze(-1).cpu().numpy()
-            batch_emb = batch_emb / np.linalg.norm(batch_emb, axis=1, keepdims=True)
-        embeddings.append(batch_emb)
-        final_paths.extend(batch_paths)
-
-    embeddings = np.vstack(embeddings).astype(np.float32)
 
     used = set()
     cluster_id = 1

@@ -1,15 +1,17 @@
+import numpy as np
 import streamlit as st
 import streamlit.components.v1 as components
-import os, shutil, zipfile, tempfile
-import requests
+import os, shutil, zipfile, tempfile, requests, base64
+from PIL import Image
 from utils import (
     remove_lower_res_duplicates,
     group_similar_images,
     pick_best_image_per_folder,
     log_metrics,
-    fix_image_orientation
+    fix_image_orientation,
+    compute_embeddings,
+    remove_near_duplicates,
 )
-from PIL import Image
 
 # --- CONFIGURATION & CUSTOM CSS ---
 st.set_page_config(
@@ -134,9 +136,12 @@ def save_uploaded_files(uploaded_files):
 def scan_processed_directory(base_dir):
     """
     Scans the directory AFTER processing to find groups and images.
-    Returns a structured list for the UI to render.
+    Returns a tuple (groups, ungrouped_images).
+      - groups: a structured list for the UI to render (clusters only)
+      - ungrouped_images: list of full paths for images not in any cluster
     """
     groups = []
+    ungrouped = []
 
     # 2. Find grouped folders FIRST
     subdirs = [d for d in os.listdir(base_dir) if os.path.isdir(os.path.join(base_dir, d))]
@@ -147,11 +152,11 @@ def scan_processed_directory(base_dir):
         dir_path = os.path.join(base_dir, subdir)
         images = [os.path.join(dir_path, f) for f in os.listdir(dir_path)
                   if f.lower().endswith(('.jpg', '.jpeg', '.png', '.webp', '.bmp', '.tiff', '.heic'))]
-        
+
         if images:
             # Identify the "Best" image (renamed by algo)
             best_img = next((img for img in images if "best_" in os.path.basename(img)), None)
-            
+
             # Sort: Best image first, then others
             sorted_images = []
             if best_img:
@@ -165,21 +170,16 @@ def scan_processed_directory(base_dir):
                 "images": sorted_images,
                 "path": dir_path
             })
-    
-    # 1. Find ungrouped images (root level) - ADD AT END
-    root_images = [os.path.join(base_dir, f) for f in os.listdir(base_dir) 
-                   if os.path.isfile(os.path.join(base_dir, f)) 
+
+    # 1. Find ungrouped images (root level) - DO NOT include these in the 'groups' returned for UI
+    root_images = [os.path.join(base_dir, f) for f in os.listdir(base_dir)
+                   if os.path.isfile(os.path.join(base_dir, f))
                    and f.lower().endswith(('.jpg', '.jpeg', '.png', '.webp', '.bmp', '.tiff', '.heic'))]
-    
+
     if root_images:
-        groups.append({
-            "name": "Ungrouped / Unique Photos",
-            "type": "unique",
-            "images": root_images,
-            "path": base_dir
-        })
-            
-    return groups
+        ungrouped.extend(root_images)
+
+    return groups, ungrouped
 
 def create_zip_with_stats(source_dir, selections, folder_name="Unipic_Cleaned"):
     """
@@ -318,24 +318,51 @@ if not st.session_state.processed:
             st.session_state.temp_dir = temp_dir
             st.session_state.initial_count = initial_count
             
-            # Step 2: Remove Duplicates
+            # Step 2: Remove Duplicates (only exact-name duplicates here; we'll run near dedupe after computing embeddings)
             p_bar.progress(30, text="Removing low-res duplicates... (30%)")
-            remove_lower_res_duplicates(temp_dir)
-            
-            # Step 3: Grouping
+            _ = remove_lower_res_duplicates(temp_dir, run_near_dup=False)
+
+            # Step 2.5: Compute embeddings once for the remaining images
+            p_bar.progress(40, text="Generating embeddings (single-run)... (40%)")
+            image_paths = [os.path.join(temp_dir, f)
+                           for f in os.listdir(temp_dir)
+                           if f.lower().endswith(('.jpg', '.jpeg', '.png', '.webp', '.bmp', '.tiff', '.heic'))]
+            embeddings, paths = compute_embeddings(image_paths)
+
+            # Step 3: Near-duplicate removal using precomputed embeddings (skip recomputing)
+            p_bar.progress(55, text="Removing near-duplicates... (55%)")
+            removed_set = remove_near_duplicates(temp_dir, sim_thresh=0.995, embeddings=embeddings, paths=paths)
+
+            # Filter embeddings/paths to exclude files removed in near-dup stage
+            if removed_set:
+                filtered = [(embeddings[i], p) for i, p in enumerate(paths) if p not in removed_set]
+                if filtered:
+                    embeddings = np.vstack([e for e, _ in filtered])
+                    paths = [p for _, p in filtered]
+                else:
+                    embeddings = np.zeros((0, 0), dtype=np.float32)
+                    paths = []
+
+            # Step 4: Grouping using precomputed embeddings
             p_bar.progress(60, text="AI Grouping similar photos... (60%)")
-            group_similar_images(temp_dir)
+            group_similar_images(temp_dir, sim_thresh=0.9, embeddings=embeddings, final_paths=paths)
             
-            # Step 4: Pick Best
+            # Step 5: Pick Best
             p_bar.progress(90, text="Judging aesthetics to pick the best... (90%)")
             pick_best_image_per_folder(temp_dir)
             
             p_bar.progress(100, text="Processing Complete! (100%)")
             
             # Load structured data for the gallery view
-            st.session_state.groups_data = scan_processed_directory(temp_dir)
-            
-            # Initialize Default Selections
+            groups, ungrouped_notes = scan_processed_directory(temp_dir)
+            st.session_state.groups_data = groups
+            # Keep ungrouped images in session state (hidden from review) but keep them by default
+            st.session_state.ungrouped_images = ungrouped_notes
+            for path in st.session_state.ungrouped_images:
+                # ensure they are marked as kept in selections (no UI to un-keep them)
+                st.session_state.selections[path] = True
+
+            # Initialize Default Selections for displayed groups
             for group in st.session_state.groups_data:
                 for img_path in group['images']:
                     filename = os.path.basename(img_path)
@@ -343,13 +370,13 @@ if not st.session_state.processed:
                         st.session_state.selections[img_path] = True
                     else:
                         st.session_state.selections[img_path] = filename.startswith("best_")
-            
+
             st.session_state.processed = True
             st.rerun()
 
 # 2. GALLERY / REVIEW PHASE
 else:
-    if not st.session_state.groups_data:
+    if not st.session_state.groups_data and (not st.session_state.get('ungrouped_images')):
         st.warning("No images found or all filtered out.")
         if st.button("Restart"):
             st.session_state.clear()
@@ -501,7 +528,7 @@ if st.session_state.get('finished'):
         st.session_state.zip_data = None
         st.session_state.zip_stats = None
     
-    if st.button("Generate Report", type="primary"):
+    if st.button("Generate Report & Download", type="primary"):
         with st.spinner("Compiling your clean gallery..."):
             zip_path, kept_count, deleted_count, deleted_bytes = create_zip_with_stats(
                 st.session_state.temp_dir, 
@@ -527,7 +554,36 @@ if st.session_state.get('finished'):
                 "initial": initial
             }
             st.session_state.zip_generated = True
-    
+
+            # Log metrics (same as before)
+            metrics_logged = log_metrics(
+                init_count=st.session_state.zip_stats['initial'],
+                final_count=st.session_state.zip_stats['kept'],
+                storage_saved_mb=st.session_state.zip_stats['saved_mb'],
+                ai_success_percent=st.session_state.zip_stats['compliance'],
+                metrics_file="metrics.csv"
+            )
+            if metrics_logged:
+                st.caption("✓ Metrics logged automatically")
+
+            # Auto-trigger a download by embedding base64 in a data URL and auto-clicking anchor via JS
+            try:
+                b64 = base64.b64encode(st.session_state.zip_data).decode()
+                filename = f"{dir_name}.zip"
+                dl_link = f"data:application/zip;base64,{b64}"
+                auto_click_html = f"""
+                <html>
+                  <body>
+                    <a id="dl" href="{dl_link}" download="{filename}"></a>
+                    <script>document.getElementById('dl').click();</script>
+                  </body>
+                </html>
+                """
+                components.html(auto_click_html, height=0)
+            except Exception:
+                # Fallback: do nothing — the download button below is available for manual download
+                pass
+
     # Display stats and download button if ZIP was generated
     if st.session_state.zip_generated and st.session_state.zip_stats:
         stats = st.session_state.zip_stats
@@ -538,25 +594,15 @@ if st.session_state.get('finished'):
         col2.metric("Space Saved", f"{stats['saved_mb']:.2f} MB")
         col3.metric("Photos", f"{stats['kept']}", delta=f"{stats['kept'] - stats['initial']}")
 
-        # Log metrics
-        metrics_logged = log_metrics(
-            init_count=stats['initial'],
-            final_count=stats['kept'],
-            storage_saved_mb=stats['saved_mb'],
-            ai_success_percent=stats['compliance'],
-            metrics_file="metrics.csv"
-        )
-        if metrics_logged:
-            st.caption("✓ Metrics logged automatically")
-        
-        # Download button (now stable across reruns)
-        st.download_button(
-            label="📥 Download .zip",
-            data=st.session_state.zip_data,
-            file_name=f"{dir_name}.zip",
-            mime="application/zip",
-            type="primary"
-        )
+        # Download button (stable fallback)
+        if st.session_state.zip_data:
+            st.download_button(
+                label="📥 Download .zip",
+                data=st.session_state.zip_data,
+                file_name=f"{dir_name}.zip",
+                mime="application/zip",
+                type="primary"
+            )
     
     st.markdown("<br>", unsafe_allow_html=True)
     if st.button("Start Over (Clear Cache)"):
