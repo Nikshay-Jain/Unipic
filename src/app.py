@@ -120,6 +120,9 @@ if 'initial_count' not in st.session_state:
     st.session_state.initial_count = 0
 if 'scroll_after_done' not in st.session_state:
     st.session_state.scroll_after_done = False
+# NEW: track which group indices the user has pressed "Next" on (i.e. "seen" groups)
+if 'seen_groups' not in st.session_state:
+    st.session_state.seen_groups = []  # list of ints
 
 # --- HELPER FUNCTIONS ---
 
@@ -280,6 +283,60 @@ def push_metrics_to_github(init_count, final_count, storage_saved_mb, ai_success
         st.warning(f"Could not push to GitHub: {e}")
         return False
 
+def create_save_progress_zip(source_dir, selections, seen_indices, groups_data, folder_name="Unipic_Partial_Save"):
+    """
+    Creates a ZIP that contains:
+     - For seen groups: only files the user kept (selections True).
+     - For unseen groups: all remaining files in their folders.
+     - All root-level (ungrouped) images.
+    Returns (zip_path, included_count).
+    """
+    zip_path = os.path.join(tempfile.gettempdir(), "unipic_partial_save.zip")
+    included_count = 0
+
+    # Map normalized group path -> index for quick lookup
+    path_to_idx = {os.path.normpath(g['path']): i for i, g in enumerate(groups_data)}
+
+    with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+        for root, _, files in os.walk(source_dir):
+            normroot = os.path.normpath(root)
+            # ROOT (ungrouped) files: include all (these are the unique/ungrouped images)
+            if normroot == os.path.normpath(source_dir):
+                for file in files:
+                    if file.lower().endswith(('.jpg', '.jpeg', '.png', '.webp', '.bmp', '.tiff', '.heic')):
+                        full = os.path.join(root, file)
+                        arcname = file.replace("best_", "")
+                        zipf.write(full, arcname)
+                        included_count += 1
+                continue
+
+            # Determine which group (if any) this folder corresponds to
+            grp_idx = path_to_idx.get(normroot, None)
+
+            for file in files:
+                if not file.lower().endswith(('.jpg', '.jpeg', '.png', '.webp', '.bmp', '.tiff', '.heic')):
+                    continue
+                full = os.path.join(root, file)
+                safe_name = file.replace("best_", "")
+                # If folder maps to a recognized group
+                if grp_idx is not None:
+                    if grp_idx in seen_indices:
+                        # seen group -> include only if user kept it
+                        keep = selections.get(full, False)
+                        if not keep:
+                            continue
+                    # unseen group -> include all files (no selection filtering)
+                    arcname = os.path.join(os.path.basename(normroot), safe_name)
+                    zipf.write(full, arcname)
+                    included_count += 1
+                else:
+                    # Not a known group folder (defensive): include
+                    arcname = os.path.join(os.path.basename(normroot), safe_name)
+                    zipf.write(full, arcname)
+                    included_count += 1
+
+    return zip_path, included_count
+
 # --- MAIN UI FLOW ---
 
 # 1. INPUT PHASE
@@ -409,11 +466,70 @@ else:
                 st.rerun()
             st.markdown('</div>', unsafe_allow_html=True)
 
+    # NEW: Save & Download Button (top)
+    with c2:
+        # center the button using inner 3-col layout and put the button in the middle column
+        inner = st.columns([1, 1, 1])
+        with inner[1]:
+            if st.button("💾 Save & Download", key=f"save_top_{idx}"):
+                # Do not implicitly mark this group as 'seen' (per spec), rely on seen_groups driven by Next clicks
+                zip_path, included = create_save_progress_zip(
+                    st.session_state.temp_dir,
+                    st.session_state.selections,
+                    set(st.session_state.seen_groups),
+                    st.session_state.groups_data,
+                    folder_name=f"{os.path.basename(st.session_state.temp_dir)}_partial"
+                )
+
+                # Auto-download decision with inline size guard
+                try:
+                    size_bytes = os.path.getsize(zip_path)
+                    MAX_INLINE = 150 * 1024 * 1024
+                    if size_bytes <= MAX_INLINE:
+                        b64 = base64.b64encode(open(zip_path, "rb").read()).decode()
+                        b64_js = b64.replace("\\", "\\\\").replace("'", "\\'").replace('"', '\\"')
+                        filename = f"{os.path.basename(zip_path)}"
+                        auto_click_html = f"""
+                        <html><body>
+                          <a id="manual_download" href="data:application/zip;base64,{b64}" download="{filename}">Click here if download doesn't start</a>
+                          <script>(function(){{
+                            try {{
+                              var b64 = "{b64_js}";
+                              var bin = atob(b64);
+                              var len = bin.length;
+                              var bytes = new Uint8Array(len);
+                              for (var i=0;i<len;i++) bytes[i]=bin.charCodeAt(i);
+                              var blob = new Blob([bytes], {{type:'application/zip'}});
+                              var url = URL.createObjectURL(blob);
+                              var a = document.createElement('a');
+                              a.href = url; a.download = "{filename}";
+                              document.body.appendChild(a); a.click();
+                              setTimeout(function(){{ URL.revokeObjectURL(url); }},1500);
+                            }} catch(e){{}}
+                          }})();</script>
+                        </body></html>
+                        """
+                        components.html(auto_click_html, height=120)
+                    else:
+                        st.warning("Partial ZIP is large (>150 MB). Use the button below to download.")
+                        with open(zip_path, "rb") as f:
+                            st.download_button(label="📥 Download Partial .zip", data=f, file_name=os.path.basename(zip_path), mime="application/zip", type="primary")
+                except Exception:
+                    st.warning("Could not auto-download. Use the button below to download the partial ZIP.")
+                    try:
+                        with open(zip_path, "rb") as f:
+                            st.download_button(label="📥 Download Partial .zip", data=f, file_name=os.path.basename(zip_path), mime="application/zip", type="primary")
+                    except Exception:
+                        st.error("Download failed. Please check server permissions or retrieve the file from the server temp directory.")
+
     # Next / Finish Button
     with c3:
         if idx < total_groups - 1:
             st.markdown('<div class="primary-btn">', unsafe_allow_html=True)
             if st.button("Next ➡", key=f"next_top_{idx}"):
+                # Mark current group as seen before moving forward
+                if idx not in st.session_state.seen_groups:
+                    st.session_state.seen_groups.append(idx)
                 st.session_state.current_group_idx += 1
                 st.rerun()
             st.markdown('</div>', unsafe_allow_html=True)
@@ -499,11 +615,67 @@ else:
                 st.rerun()
             st.markdown('</div>', unsafe_allow_html=True)
 
+    # NEW: Save & Download Button (bottom)
+    with c2:
+        # center the button using inner 3-col layout and put the button in the middle column
+        inner = st.columns([1, 1, 1])
+        with inner[1]:
+            if st.button("💾 Save & Download", key=f"save_bottom_{idx}"):
+                zip_path, included = create_save_progress_zip(
+                    st.session_state.temp_dir,
+                    st.session_state.selections,
+                    set(st.session_state.seen_groups),
+                    st.session_state.groups_data,
+                    folder_name=f"{os.path.basename(st.session_state.temp_dir)}_partial"
+                )
+                try:
+                    size_bytes = os.path.getsize(zip_path)
+                    MAX_INLINE = 150 * 1024 * 1024
+                    if size_bytes <= MAX_INLINE:
+                        b64 = base64.b64encode(open(zip_path, "rb").read()).decode()
+                        b64_js = b64.replace("\\", "\\\\").replace("'", "\\'").replace('"', '\\"')
+                        filename = f"{os.path.basename(zip_path)}"
+                        auto_click_html = f"""
+                        <html><body>
+                          <a id="manual_download" href="data:application/zip;base64,{b64}" download="{filename}">Click here if download doesn't start</a>
+                          <script>(function(){{
+                            try {{
+                              var b64 = "{b64_js}";
+                              var bin = atob(b64);
+                              var len = bin.length;
+                              var bytes = new Uint8Array(len);
+                              for (var i=0;i<len;i++) bytes[i]=bin.charCodeAt(i);
+                              var blob = new Blob([bytes], {{type:'application/zip'}});
+                              var url = URL.createObjectURL(blob);
+                              var a = document.createElement('a');
+                              a.href = url; a.download = "{filename}";
+                              document.body.appendChild(a); a.click();
+                              setTimeout(function(){{ URL.revokeObjectURL(url); }},1500);
+                            }} catch(e){{}}
+                          }})();</script>
+                        </body></html>
+                        """
+                        components.html(auto_click_html, height=120)
+                    else:
+                        st.warning("Partial ZIP is large (>150 MB). Use the button below to download.")
+                        with open(zip_path, "rb") as f:
+                            st.download_button(label="📥 Download Partial .zip", data=f, file_name=os.path.basename(zip_path), mime="application/zip", type="primary")
+                except Exception:
+                    st.warning("Could not auto-download. Use the button below to download the partial ZIP.")
+                    try:
+                        with open(zip_path, "rb") as f:
+                            st.download_button(label="📥 Download Partial .zip", data=f, file_name=os.path.basename(zip_path), mime="application/zip", type="primary")
+                    except Exception:
+                        st.error("Download failed. Please check server permissions or retrieve the file from the server temp directory.")
+
     # Next / Finish Button
     with c3:
         if idx < total_groups - 1:
             st.markdown('<div class="primary-btn">', unsafe_allow_html=True)
             if st.button("Next ➡", key=f"next_bottom_{idx}"):
+                # Mark current group as seen before moving forward
+                if idx not in st.session_state.seen_groups:
+                    st.session_state.seen_groups.append(idx)
                 st.session_state.current_group_idx += 1
                 st.rerun()
             st.markdown('</div>', unsafe_allow_html=True)
