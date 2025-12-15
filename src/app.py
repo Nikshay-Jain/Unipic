@@ -528,7 +528,7 @@ if st.session_state.get('finished'):
         st.session_state.zip_data = None
         st.session_state.zip_stats = None
     
-    if st.button("Generate Report & Download", type="primary"):
+    if st.button("Generate Report", type="primary"):
         with st.spinner("Compiling your clean gallery..."):
             zip_path, kept_count, deleted_count, deleted_bytes = create_zip_with_stats(
                 st.session_state.temp_dir, 
@@ -542,10 +542,8 @@ if st.session_state.get('finished'):
             mb_saved = deleted_bytes / (1024 * 1024)
             initial = st.session_state.initial_count
             
-            # Store ZIP data in session state (persists across reruns)
-            with open(zip_path, "rb") as fp:
-                st.session_state.zip_data = fp.read()
-            
+            # Store ZIP path in session state (avoid loading large bytes)
+            st.session_state.zip_path = zip_path
             st.session_state.zip_stats = {
                 "kept": kept_count,
                 "deleted": deleted_count,
@@ -554,6 +552,8 @@ if st.session_state.get('finished'):
                 "initial": initial
             }
             st.session_state.zip_generated = True
+            # Track if auto-download was attempted/succeeded (used to conditionally show fallback button)
+            st.session_state.auto_download_attempted = False
 
             # Log metrics (same as before)
             metrics_logged = log_metrics(
@@ -566,25 +566,75 @@ if st.session_state.get('finished'):
             if metrics_logged:
                 st.caption("✓ Metrics logged automatically")
 
-            # Auto-trigger a download by embedding base64 in a data URL and auto-clicking anchor via JS
+            # Auto-download decision: only embed base64 for reasonably-sized zips to avoid MessageSizeError
             try:
-                b64 = base64.b64encode(st.session_state.zip_data).decode()
-                filename = f"{dir_name}.zip"
-                dl_link = f"data:application/zip;base64,{b64}"
-                auto_click_html = f"""
-                <html>
-                  <body>
-                    <a id="dl" href="{dl_link}" download="{filename}"></a>
-                    <script>document.getElementById('dl').click();</script>
-                  </body>
-                </html>
-                """
-                components.html(auto_click_html, height=0)
-            except Exception:
-                # Fallback: do nothing — the download button below is available for manual download
-                pass
-
-    # Display stats and download button if ZIP was generated
+                size_bytes = os.path.getsize(zip_path)
+                MAX_INLINE = 150 * 1024 * 1024  # 150 MB threshold
+                if size_bytes <= MAX_INLINE:
+                    # safe to embed and auto-download
+                    b64 = base64.b64encode(open(zip_path, "rb").read()).decode()
+                    # Escape for safely embedding in JS string
+                    b64_js = b64.replace("\\", "\\\\").replace("'", "\\'").replace('"', '\\"')
+                    filename = f"{dir_name}.zip"
+                    auto_click_html = f"""
+                    <html>
+                      <body>
+                        <!-- Visible fallback link if auto-download fails -->
+                        <a id="manual_download" href="data:application/zip;base64,{b64}" download="{filename}">Click here if download doesn't start</a>
+                        <script>
+                        (function(){{
+                            try {{
+                                var b64 = "{b64_js}";
+                                var binary_string = atob(b64);
+                                var len = binary_string.length;
+                                var bytes = new Uint8Array(len);
+                                for (var i = 0; i < len; i++) {{
+                                    bytes[i] = binary_string.charCodeAt(i);
+                                }}
+                                var blob = new Blob([bytes], {{type: 'application/zip'}});
+                                var url = URL.createObjectURL(blob);
+                                var a = document.createElement('a');
+                                a.href = url;
+                                a.download = "{filename}";
+                                document.body.appendChild(a);
+                                a.click();
+                                setTimeout(function(){{ URL.revokeObjectURL(url); }}, 1500);
+                            }} catch (e) {{
+                                // fallback link is visible for manual download
+                            }}
+                        }})();
+                        </script>
+                      </body>
+                    </html>
+                    """
+                    components.html(auto_click_html, height=120)
+                    st.session_state.auto_download_attempted = True
+                else:
+                    # Too large to safely embed — show warning and direct download button
+                    st.warning("The generated ZIP is large (>150 MB). Auto-download is disabled to avoid browser/server message size limits. Use the button below to download (may still be subject to server limits). To enable inline downloads for large files, increase server.maxMessageSize in your Streamlit config.")
+                    # Show a single download button (fallback) that streams the file from disk
+                    with open(zip_path, "rb") as f:
+                        st.download_button(
+                            label="📥 Download .zip",
+                            data=f,
+                            file_name=f"{dir_name}.zip",
+                            mime="application/zip",
+                            type="primary"
+                        )
+            except Exception as e:
+                st.warning("Auto-download failed or encountered an error. Use the button below to download the ZIP.")
+                try:
+                    with open(zip_path, "rb") as f:
+                        st.download_button(
+                            label="📥 Download .zip",
+                            data=f,
+                            file_name=f"{dir_name}.zip",
+                            mime="application/zip",
+                            type="primary"
+                        )
+                except Exception:
+                    st.error("Could not provide download. Consider increasing server.maxMessageSize or retrieving the ZIP from the server's temp directory.")
+    # Display stats (show manual download button only if auto-download was NOT attempted)
     if st.session_state.zip_generated and st.session_state.zip_stats:
         stats = st.session_state.zip_stats
         
@@ -593,17 +643,20 @@ if st.session_state.get('finished'):
         col1.metric("AI Compliance", f"{stats['compliance']:.0f}%", help="How often you kept the AI's best choice")
         col2.metric("Space Saved", f"{stats['saved_mb']:.2f} MB")
         col3.metric("Photos", f"{stats['kept']}", delta=f"{stats['kept'] - stats['initial']}")
-
-        # Download button (stable fallback)
-        if st.session_state.zip_data:
-            st.download_button(
-                label="📥 Download .zip",
-                data=st.session_state.zip_data,
-                file_name=f"{dir_name}.zip",
-                mime="application/zip",
-                type="primary"
-            )
-    
+        
+        # If auto-download wasn't attempted (e.g., large file), ensure a manual download button is available
+        if not st.session_state.get('auto_download_attempted', False) and st.session_state.get('zip_path'):
+            try:
+                with open(st.session_state.zip_path, "rb") as f:
+                    st.download_button(
+                        label="📥 Download .zip",
+                        data=f,
+                        file_name=f"{dir_name}.zip",
+                        mime="application/zip",
+                        type="primary"
+                    )
+            except Exception:
+                st.info("Download is unavailable here; consider increasing server.maxMessageSize or retrieve the ZIP from the server's temp directory.")
     st.markdown("<br>", unsafe_allow_html=True)
     if st.button("Start Over (Clear Cache)"):
         try:

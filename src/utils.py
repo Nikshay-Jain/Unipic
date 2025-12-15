@@ -190,7 +190,7 @@ def remove_near_duplicates(folder_path, sim_thresh=0.99, batch_size=32, model=_m
         return set()
 
     removed = set()
-    print("\n🔎 Scanning for near-duplicates (>={:.3f})...".format(sim_thresh))
+    print("\n🔎 Scanning for near-duplicates (>={:.2f})...".format(sim_thresh))
     for i in range(len(paths)):
         if paths[i] in removed:
             continue
