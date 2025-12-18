@@ -471,7 +471,7 @@ else:
         # center the button using inner 3-col layout and put the button in the middle column
         inner = st.columns([1, 1, 1])
         with inner[1]:
-            if st.button("💾 Save & Download", key=f"save_top_{idx}"):
+            if st.button("Save this", key=f"save_top_{idx}"):
                 # Do not implicitly mark this group as 'seen' (per spec), rely on seen_groups driven by Next clicks
                 zip_path, included = create_save_progress_zip(
                     st.session_state.temp_dir,
@@ -787,7 +787,7 @@ if st.session_state.get('finished'):
                     # Show a single download button (fallback) that streams the file from disk
                     with open(zip_path, "rb") as f:
                         st.download_button(
-                            label="📥 Download .zip",
+                            label="Download .zip",
                             data=f,
                             file_name=f"{dir_name}.zip",
                             mime="application/zip",
@@ -798,7 +798,7 @@ if st.session_state.get('finished'):
                 try:
                     with open(zip_path, "rb") as f:
                         st.download_button(
-                            label="📥 Download .zip",
+                            label="Download .zip",
                             data=f,
                             file_name=f"{dir_name}.zip",
                             mime="application/zip",
@@ -821,7 +821,7 @@ if st.session_state.get('finished'):
             try:
                 with open(st.session_state.zip_path, "rb") as f:
                     st.download_button(
-                        label="📥 Download .zip",
+                        label="Download .zip",
                         data=f,
                         file_name=f"{dir_name}.zip",
                         mime="application/zip",
