@@ -256,7 +256,7 @@ class ImageDataset(Dataset):
         for path in image_paths:
             try:
                 with Image.open(path) as img:
-                    img.verify()  # lightweight check
+                    img.convert("RGB")
                 self.image_paths.append(path)
             except (UnidentifiedImageError, OSError):
                 print(f"[✗] Removing corrupted image: {path}")
@@ -273,12 +273,10 @@ class ImageDataset(Dataset):
         path = self.image_paths[idx]
         try:
             image = Image.open(path).convert("RGB")
-            image = fix_image_orientation(image)    # Fix EXIF orientation before returning
-        except (UnidentifiedImageError, OSError):
-            print(f"[✗] Skipping broken image during load: {path}")
-            os.remove(path)
-            return None
-        return self.transform(image), path
+            image = fix_image_orientation(image)
+            return self.transform(image), path
+        except Exception as e:
+            raise RuntimeError(f"Invalid image file: {path}") from e
 
 def group_similar_images(input_dir, sim_thresh=0.9, batch_size=32, model=_model, transform=_transform, use_gpu=True, embeddings=None, final_paths=None):
     """
