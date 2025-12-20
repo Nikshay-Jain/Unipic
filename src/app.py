@@ -620,7 +620,7 @@ else:
         # center the button using inner 3-col layout and put the button in the middle column
         inner = st.columns([1, 1, 1])
         with inner[1]:
-            if st.button("💾 Save & Download", key=f"save_bottom_{idx}"):
+            if st.button("Save this", key=f"save_bottom_{idx}"):
                 zip_path, included = create_save_progress_zip(
                     st.session_state.temp_dir,
                     st.session_state.selections,
