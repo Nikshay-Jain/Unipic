@@ -36,29 +36,41 @@ similarity_matrix = cosine_similarity(embeddings)
 ```
 
 ### 🏆 **AI Aesthetic Ranking**
-Leverages **OpenAI's CLIP** (Contrastive Language-Image Pre-training) to score images against quality metrics:
+Leverages **OpenAI's CLIP** (Contrastive Language-Image Pre-training) to score images against custom quality metrics:
 - Sharpness & focus
 - Composition & framing
 - Lighting & color balance
-- Facial expressions (if applicable)
+- Facial expressions, body aesthetics & skin quality
+- **Customizable prompts** to prioritize your preferences
 
 ```python
-prompt = "a beautiful, sharp, well-composed photo with aesthetic quality"
+prompt = "a beautiful, sharp, well-composed photo with attractive expressions and aesthetic appeal"
 score = clip_model.similarity(image_features, text_features)
 ```
 
-### 📊 **Smart Analytics Dashboard**
-- **Space Saved**: Tracks MB/GB recovered
-- **AI Compliance Rate**: Percentage of times you agreed with AI's top pick
-- **Reduction Metrics**: Before/after photo counts
+### 📊 **Real-Time Analytics Dashboard**
+- **Space Saved**: Tracks MB/GB recovered in real-time
+- **AI Compliance Rate**: Percentage of times you agreed with AI's best pick
+- **Reduction Metrics**: Detailed before/after photo counts and visual trends
 
-### 🧹 **Automatic Pre-Processing**
-- Detects and removes lower-resolution duplicates (same name, different extensions)
-- Validates image integrity and removes corrupted files
-- Supports JPEG, PNG, HEIC, WebP, BMP, TIFF formats
+### 🧹 **Automatic Pre-Processing Pipeline**
+- **Exact Duplicate Removal**: Detects and removes low-resolution duplicates (same name, different extensions)
+- **Near-Duplicate Detection**: Uses similarity scoring to find and eliminate near-identical shots (customizable threshold)
+- **Corruption Detection**: Validates image integrity and automatically removes corrupted files
+- **EXIF Auto-Correction**: Fixes image orientation issues automatically
+- **Format Support**: JPEG, PNG, HEIC, WebP, BMP, TIFF formats
+
+### 💾 **Progressive Save & Download**
+- **Save Anytime**: Download your progress at any point during review—don't wait to finish
+- **Smart Partial Saves**: 
+  - ✅ For reviewed groups: Keeps only your selected images
+  - 🔄 For unreviewed groups: Includes all originals (unfiltered)
+  - 📸 Ungrouped images: Automatically included (unique/standalone photos)
+- **Zero Exact Duplicates**: Respects all pre-processing removals (near-duplicates already filtered)
+- **Perfect for Large Collections**: Exit early with reviewed batch, resume later if needed
 
 ### 📱 **Mobile-First Interface**
-Built with **Streamlit** for a responsive, touch-friendly UI that works seamlessly across devices.
+Built with **Streamlit** for a responsive, touch-friendly UI that works seamlessly across devices—desktop to smartphone.
 
 ---
 
@@ -103,42 +115,95 @@ docker run -p 8501:8501 unipic
 ### **1. Upload & Secure**
 Drag and drop your photo collection. Files are copied to an isolated temporary directory—**your originals are never modified**.
 
-### **2. Intelligent Pipeline Execution**
+### **2. Intelligent Processing Pipeline**
 
 ```mermaid
 graph LR
     A[Upload Photos] --> B[Remove Low-Res Duplicates]
     B --> C[Extract CNN Embeddings]
-    C --> D[Cluster Similar Images]
-    D --> E[CLIP Aesthetic Scoring]
-    E --> F[User Review Interface]
-    F --> G[Export Clean Gallery]
+    C --> D[Remove Near-Duplicates]
+    D --> E[Cluster Similar Images]
+    E --> F[CLIP Aesthetic Scoring]
+    F --> G[User Review Interface]
+    G --> H[Save Progress or Finish]
+    H --> I[Export Clean Gallery]
 ```
 
 **Step-by-Step Breakdown:**
 
 | Phase | Technology | Purpose |
 |-------|-----------|---------|
-| **Deduplication** | PIL + Resolution Comparison | Eliminates same-name files with lower dimensions |
+| **Exact Deduplication** | PIL + Resolution Comparison | Eliminates same-name files with lower dimensions |
 | **Feature Extraction** | MobileNetV3 (Batch Mode) | Generates 576-dimensional embedding vectors |
+| **Near-Duplicate Removal** | Cosine Similarity (0.995 threshold) | Removes near-identical photos before clustering |
 | **Clustering** | Cosine Similarity + Greedy Grouping | Groups images with ≥0.9 similarity score |
-| **Ranking** | CLIP ViT-B/32 | Scores images against quality text prompt |
+| **Ranking** | CLIP ViT-B/32 | Scores images against custom quality text prompt |
 | **Output** | ZIP Archive | Packages selected photos with metadata |
 
 ### **3. Interactive Review**
 - Navigate through detected groups using pagination
-- **AI Recommendation** shown prominently (largest thumbnail + badge)
-- Toggle checkboxes to keep alternative shots
-- Real-time selection tracking
+- **AI Recommendation** shown prominently (largest thumbnail with "AI RECOMMENDATION" badge)
+- Toggle checkboxes to keep or discard alternatives
+- **Save & Download button** available on every group (not just at the end)
+- Real-time selection tracking with visual feedback
 
-### **4. Download Results**
+### **4. Flexible Download Options**
+
+**Option A: Save Progress Anytime** 
+- Click "Save this" during review of any group
+- Downloads your current progress (reviewed selections + unreviewed originals)
+- Perfect for large collections—exit early with cleaned partial batch
+
+**Option B: Finish All & Generate Report**
+- Review all groups and click "Done"
+- Generates comprehensive report with statistics
+- Download complete cleaned gallery with detailed metrics
+
+### **5. Download Results**
 - Name your cleaned album
-- Get detailed statistics (space saved, AI compliance rate)
-- Download as organized ZIP file
+- Get detailed statistics (space saved, AI compliance rate, reduction metrics)
+- Download as organized ZIP file (all near-duplicates already removed)
 
 ---
 
-## 🔬 Technical Architecture
+## 🏗️ Architecture & Workflow
+
+### **Three-Phase User Journey**
+
+#### **Phase 1: Upload & Processing**
+- User uploads photos
+- System performs automatic exact-duplicate removal
+- Embeddings computed once (single-run for efficiency)
+- Near-duplicates removed using pre-computed embeddings
+- Visual clustering groups similar images
+- AI aesthetic ranking marks best image per group
+- Transitions to interactive review phase
+
+#### **Phase 2: Interactive Review**
+- User navigates through each group
+- AI recommendation prominently displayed with "AI RECOMMENDATION" badge
+- User selects which images to keep
+- **Key Addition**: "Save this" button available on every group (top & bottom nav)
+  - Saves only reviewed selections for seen groups
+  - Includes all originals for unseen groups
+  - Downloads partial gallery immediately
+- Tracks which groups have been reviewed via "Next" button clicks
+- User can exit early with partial save or continue reviewing
+
+#### **Phase 3: Completion & Export**
+- User clicks "Done" after reviewing all groups
+- Generates comprehensive report with metrics
+- Option to name the album
+- Download final cleaned gallery with detailed analytics
+- Metrics automatically logged to CSV
+
+### **Key State Management**
+- `seen_groups`: List of group indices user has clicked "Next" on (tracks review progress)
+- `selections`: Dictionary mapping file paths to keep/discard decisions
+- `zip_path`: Stores processed gallery location (persists across reruns)
+- `groups_data`: Structured list of detected similar groups with metadata
+
+---
 
 ### **Core Dependencies**
 
@@ -210,6 +275,17 @@ def group_similar_images(embeddings, threshold=0.9):
     return clusters
 ```
 
+### **Near-Duplicate Removal Strategy**
+
+```python
+# Default similarity threshold: 0.995 (very strict)
+# Removes near-identical photos with intelligent tie-breaking:
+# 1. Prefers images without artifacts/watermarks
+# 2. Keeps higher-resolution version
+# 3. Falls back to file size comparison
+# 4. Preserves marked "best_" images
+```
+
 ---
 
 ## 📂 Project Structure
@@ -244,25 +320,39 @@ group_similar_images(input_dir, sim_thresh=0.85)  # More lenient (groups more)
 group_similar_images(input_dir, sim_thresh=0.95)  # Stricter (fewer groups)
 ```
 
+### Adjust Near-Duplicate Detection
+Fine-tune the near-duplicate removal threshold (default 0.995):
+
+```python
+# More aggressive removal (catches more duplicates)
+remove_near_duplicates(folder_path, sim_thresh=0.98)
+
+# More conservative (only removes nearly identical)
+remove_near_duplicates(folder_path, sim_thresh=0.999)
+```
+
 ### Change Aesthetic Criteria
 Edit the CLIP scoring prompt in `pick_best_image_per_folder()`:
 
 ```python
-# Original (general quality)
-text_prompt = "a beautiful, sharp, well-composed photo"
+# Original (balanced quality with aesthetic focus)
+text_prompt = "a beautiful, sharp, well-composed photo with attractive facial expressions, tall & slim body, aesthetic eyes, flawless skin & background."
 
-# Custom (e.g., for portraits)
-text_prompt = "a professional portrait with great lighting and natural expression"
+# For Landscapes
+text_prompt = "a stunning landscape with vibrant colors, perfect composition, and great lighting"
 
-# Custom (e.g., for landscapes)
-text_prompt = "a stunning landscape with vibrant colors and perfect composition"
+# For Portraits
+text_prompt = "a professional portrait with perfect lighting, natural expression, and flawless skin"
+
+# For General Quality
+text_prompt = "a high-quality, sharp, well-composed photo with perfect lighting and framing"
 ```
 
 ### Batch Size Tuning
 For systems with limited RAM/VRAM:
 
 ```python
-# In utils.py
+# In utils.py or app.py
 loader = DataLoader(dataset, batch_size=16)  # Reduce from 32
 ```
 
@@ -284,12 +374,17 @@ loader = DataLoader(dataset, batch_size=16)  # Reduce from 32
 | 200 photos  | ~45s     | ~3min    |
 | 500 photos  | ~2min    | ~8min    |
 
-*Times include full pipeline (clustering + CLIP scoring)*
+*Times include full pipeline (clustering + near-dup removal + CLIP scoring)*
+
+**File Size Handling:**
+- Files ≤150 MB: Auto-download triggered immediately
+- Files >150 MB: Manual fallback button provided (respects server limits)
 
 ### **Limitations**
 - **Subjective Quality**: AI prioritizes technical metrics. It won't understand sentimental value (e.g., a blurry photo of a special moment).
 - **HEIC Support**: Requires `pillow-heif`. Install separately if needed.
 - **Memory Usage**: Large batches (1000+ photos) may require 8GB+ RAM.
+- **Save Progress Feature**: Only works within the current session. To permanently save, download the ZIP.
 
 ---
 
@@ -300,7 +395,7 @@ loader = DataLoader(dataset, batch_size=16)  # Reduce from 32
 - [ ] **Batch CLI Mode** with config files
 - [ ] **Cloud Storage Integration** (Google Photos, iCloud)
 - [ ] **Progressive Web App** (offline capability)
-- [ ] **Advanced Filters** (remove blurry, remove screenshots)
+- [ ] **Advanced Filters** (remove blurry, remove screenshots, de-duplicate)
 - [ ] **Export Presets** (Instagram, 4K, Print quality)
 
 ---
